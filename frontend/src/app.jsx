@@ -1,6 +1,6 @@
 // frontend/src/App.jsx
 
-import React, { useState, useEffect, useRef, useCallback } from 'react'; // eslint-disable-line no-unused-vars
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import io from 'socket.io-client';
 // eslint-disable-next-line no-unused-vars
 import { motion, AnimatePresence } from 'framer-motion';
@@ -49,7 +49,7 @@ const formatBytes = (bytes, decimals = 2) => {
 export default function App() {
   // --- State Management ---
   const [socket, setSocket] = useState(null);
-  const [nickname, setNickname] = useState(getRandomAnimal());
+  const [nickname, setNickname] = useState(() => getRandomAnimal()); // Use function form to run only once
   const [isEditingNickname, setIsEditingNickname] = useState(false);
   const [users, setUsers] = useState([]);
   const [selectedFile, setSelectedFile] = useState(null);
@@ -64,7 +64,7 @@ export default function App() {
     from: null,
     to: null,
     file: null,
-    senderNickname: { name: '', emoji: '' }, // *** FIX: Initialize as an object ***
+    senderNickname: { name: '', emoji: '' },
   });
 
   // --- Refs ---
@@ -72,47 +72,34 @@ export default function App() {
   const fileReader = useRef(null);
   const receivedData = useRef([]);
   const receivedSize = useRef(0);
-  const fileInputRef = useRef(null);
 
   // --- Utility Functions ---
   const addLog = useCallback((message, type = 'info') => {
     console.log(`[${type.toUpperCase()}] ${message}`);
-    setLogs(prev => [...prev, { message, type, time: new Date().toLocaleTimeString() }]);
+    setLogs(prev => [{ message, type, time: new Date().toLocaleTimeString() }, ...prev]);
+  }, []);
+  
+  // --- Socket.io Connection ---
+  // *** FIX: This useEffect now only runs ONCE to establish the connection. ***
+  useEffect(() => {
+    const newSocket = io(SERVER_URL);
+    setSocket(newSocket);
+
+    return () => {
+      newSocket.disconnect();
+    };
   }, []);
 
-  // --- Socket.io Connection ---
-  useEffect(() => {
-    if (!socket) {
-      const newSocket = io(SERVER_URL);
-      setSocket(newSocket);
-
-      newSocket.on('connect', () => {
-        addLog(`Connected to server with ID: ${newSocket.id}`, 'success');
-        newSocket.emit('user-joined', nickname);
-      });
-
-      newSocket.on('disconnect', () => {
-        addLog('Disconnected from server', 'error');
-      });
-    }
-    
-    return () => {
-        if(socket && socket.connected) {
-            socket.disconnect();
-        }
-    };
-  }, [nickname, addLog]);
-
   // --- WebRTC Peer Connection Management ---
-  const createPeerConnection = useCallback(() => {
+  const createPeerConnection = useCallback((targetSocketId) => {
     try {
       const pc = new RTCPeerConnection({
         iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
       });
 
       pc.onicecandidate = (event) => {
-        if (event.candidate && socket && transferState.to) {
-          socket.emit('webrtc-ice-candidate', { to: transferState.to, candidate: event.candidate });
+        if (event.candidate && socket) {
+          socket.emit('webrtc-ice-candidate', { to: targetSocketId, candidate: event.candidate });
         }
       };
 
@@ -127,21 +114,22 @@ export default function App() {
       setTransferState(prev => ({ ...prev, status: 'error', file: null }));
       return null;
     }
-  }, [socket, transferState.to, addLog]);
+  }, [socket, addLog]);
 
   // --- File Transfer Logic ---
-  const sendFile = useCallback((file, targetSocketId) => {
-    if (!socket) return;
-    setTransferState({ status: 'requesting', progress: 0, to: targetSocketId, from: socket.id, file, senderNickname: nickname });
+  const sendFile = useCallback((file, targetUser) => {
+    if (!socket || !file || !targetUser) return;
+    setTransferState({ status: 'requesting', progress: 0, to: targetUser.id, from: socket.id, file, senderNickname: nickname });
     socket.emit('file-request', {
-      to: targetSocketId,
+      to: targetUser.id,
       from: socket.id,
       file: { name: file.name, size: file.size, type: file.type }
     });
-    addLog(`Sent file request for ${file.name} to ${users.find(u => u.id === targetSocketId)?.nickname?.name}`, 'info');
-  }, [socket, users, addLog, nickname]);
+    addLog(`Sent file request for ${file.name} to ${targetUser.nickname.name}`, 'info');
+  }, [socket, nickname]);
 
-  const handleFileChunk = useCallback((pc) => {
+  const handleFileChunk = useCallback((pc, file) => {
+    if (!file) return;
     const dataChannel = pc.createDataChannel('file-transfer');
     dataChannel.binaryType = 'arraybuffer';
 
@@ -156,10 +144,10 @@ export default function App() {
         try {
           dataChannel.send(e.target.result);
           offset += e.target.result.byteLength;
-          const progress = Math.round((offset / selectedFile.size) * 100);
+          const progress = Math.round((offset / file.size) * 100);
           setTransferState(prev => ({ ...prev, progress }));
 
-          if (offset < selectedFile.size) {
+          if (offset < file.size) {
             readSlice(offset);
           } else {
             addLog('File sent successfully!', 'success');
@@ -173,30 +161,25 @@ export default function App() {
       };
       
       const readSlice = (o) => {
-        const slice = selectedFile.slice(o, o + CHUNK_SIZE);
+        const slice = file.slice(o, o + CHUNK_SIZE);
         fileReader.current.readAsArrayBuffer(slice);
       };
       readSlice(0);
     };
 
-    dataChannel.onclose = () => {
-      addLog('Data channel closed.', 'info');
-    };
-    
+    dataChannel.onclose = () => { addLog('Data channel closed.', 'info'); };
     dataChannel.onerror = (error) => {
       addLog(`Data channel error: ${error}`, 'error');
       setTransferState({ status: 'error', file: null });
     };
 
-  }, [selectedFile, addLog]);
+  }, [addLog]);
 
   const resetTransferState = () => {
     setTransferState({ status: 'idle', progress: 0, from: null, to: null, file: null, senderNickname: { name: '', emoji: '' } });
     setSelectedFile(null);
     setSelectedUser(null);
-    if (receivedData.current.length > 0) {
-        receivedData.current = [];
-    }
+    receivedData.current = [];
     receivedSize.current = 0;
     if (peerConnection.current) {
         peerConnection.current.close();
@@ -205,16 +188,25 @@ export default function App() {
   };
 
   // --- Socket Event Handlers ---
+  // *** FIX: This useEffect now robustly handles all event listeners. ***
   useEffect(() => {
     if (!socket) return;
 
-    const handleUpdateUserList = (userList) => {
+    const onConnect = () => {
+      addLog(`Connected to server with ID: ${socket.id}`, 'success');
+      socket.emit('user-joined', nickname);
+    };
+
+    const onDisconnect = () => {
+      addLog('Disconnected from server', 'error');
+    };
+
+    const onUpdateUserList = (userList) => {
       setUsers(userList);
       addLog('User list updated.');
     };
 
-    // *** FIX: Handle the senderNickname as an object ***
-    const handleFileRequest = ({ from, senderNickname, file }) => {
+    const onFileRequest = ({ from, senderNickname, file }) => {
       if (senderNickname && senderNickname.name) {
           setTransferState({ status: 'receiving', progress: 0, from, to: socket.id, file, senderNickname });
           addLog(`Incoming file request from ${senderNickname.name} for ${file.name}`, 'info');
@@ -223,26 +215,32 @@ export default function App() {
       }
     };
 
-    const handleFileAccept = async ({ from }) => {
-      addLog(`${users.find(u => u.id === from)?.nickname?.name} accepted the file.`, 'success');
+    const onFileAccept = async ({ from }) => {
+      const fromUser = users.find(u => u.id === from);
+      if (!fromUser) return;
+      addLog(`${fromUser.nickname.name} accepted the file.`, 'success');
       setTransferState(prev => ({ ...prev, status: 'accepted', to: from }));
-      const pc = createPeerConnection();
-      if (pc) {
-        handleFileChunk(pc);
+      const pc = createPeerConnection(from);
+      if (pc && selectedFile) {
+        handleFileChunk(pc, selectedFile);
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
         socket.emit('webrtc-offer', { to: from, offer });
       }
     };
     
-    const handleFileReject = ({ from }) => {
-      addLog(`${users.find(u => u.id === from)?.nickname?.name} rejected the file.`, 'error');
+    const onFileReject = ({ from }) => {
+      const fromUser = users.find(u => u.id === from);
+      if (!fromUser) return;
+      addLog(`${fromUser.nickname.name} rejected the file.`, 'error');
       resetTransferState();
     };
 
-    const handleWebRTCOffer = async ({ from, offer }) => {
-      addLog(`Received WebRTC offer from ${users.find(u => u.id === from)?.nickname?.name}`, 'info');
-      const pc = createPeerConnection();
+    const onWebRTCOffer = async ({ from, offer }) => {
+      const fromUser = users.find(u => u.id === from);
+      if (!fromUser) return;
+      addLog(`Received WebRTC offer from ${fromUser.nickname.name}`, 'info');
+      const pc = createPeerConnection(from);
       if (pc) {
         pc.ondatachannel = (event) => {
           const receiveChannel = event.channel;
@@ -269,7 +267,6 @@ export default function App() {
             }
           };
         };
-        setTransferState(prev => ({...prev, to: from}));
         await pc.setRemoteDescription(new RTCSessionDescription(offer));
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
@@ -277,14 +274,14 @@ export default function App() {
       }
     };
     
-    const handleWebRTCAnswer = async ({ answer }) => {
+    const onWebRTCAnswer = async ({ answer }) => {
       addLog('Received WebRTC answer.', 'info');
       if (peerConnection.current) {
         await peerConnection.current.setRemoteDescription(new RTCSessionDescription(answer));
       }
     };
 
-    const handleWebRTCIceCandidate = async ({ candidate }) => {
+    const onWebRTCIceCandidate = async ({ candidate }) => {
       if (peerConnection.current) {
         try {
           await peerConnection.current.addIceCandidate(new RTCIceCandidate(candidate));
@@ -294,24 +291,30 @@ export default function App() {
       }
     };
 
-    socket.on('update-user-list', handleUpdateUserList);
-    socket.on('file-request', handleFileRequest);
-    socket.on('file-accept', handleFileAccept);
-    socket.on('file-reject', handleFileReject);
-    socket.on('webrtc-offer', handleWebRTCOffer);
-    socket.on('webrtc-answer', handleWebRTCAnswer);
-    socket.on('webrtc-ice-candidate', handleWebRTCIceCandidate);
+    // Register listeners
+    socket.on('connect', onConnect);
+    socket.on('disconnect', onDisconnect);
+    socket.on('update-user-list', onUpdateUserList);
+    socket.on('file-request', onFileRequest);
+    socket.on('file-accept', onFileAccept);
+    socket.on('file-reject', onFileReject);
+    socket.on('webrtc-offer', onWebRTCOffer);
+    socket.on('webrtc-answer', onWebRTCAnswer);
+    socket.on('webrtc-ice-candidate', onWebRTCIceCandidate);
 
+    // Cleanup listeners
     return () => {
-      socket.off('update-user-list', handleUpdateUserList);
-      socket.off('file-request', handleFileRequest);
-      socket.off('file-accept', handleFileAccept);
-      socket.off('file-reject', handleFileReject);
-      socket.off('webrtc-offer', handleWebRTCOffer);
-      socket.off('webrtc-answer', handleWebRTCAnswer);
-      socket.off('webrtc-ice-candidate', handleWebRTCIceCandidate);
+      socket.off('connect', onConnect);
+      socket.off('disconnect', onDisconnect);
+      socket.off('update-user-list', onUpdateUserList);
+      socket.off('file-request', onFileRequest);
+      socket.off('file-accept', onFileAccept);
+      socket.off('file-reject', onFileReject);
+      socket.off('webrtc-offer', onWebRTCOffer);
+      socket.off('webrtc-answer', onWebRTCAnswer);
+      socket.off('webrtc-ice-candidate', onWebRTCIceCandidate);
     };
-  }, [socket, addLog, createPeerConnection, handleFileChunk, transferState.file, users]);
+  }, [socket, nickname, addLog, users, createPeerConnection, handleFileChunk, selectedFile, transferState.file]);
 
   // --- UI Event Handlers ---
   const handleNicknameChange = (e) => {
@@ -336,11 +339,13 @@ export default function App() {
   };
 
   const handleAcceptFile = () => {
+    if(!socket || !transferState.from) return;
     socket.emit('file-accept', { to: transferState.from });
     addLog('Accepted file transfer.', 'success');
   };
 
   const handleRejectFile = () => {
+    if(!socket || !transferState.from) return;
     socket.emit('file-reject', { to: transferState.from });
     addLog('Rejected file transfer.', 'error');
     resetTransferState();
@@ -443,7 +448,7 @@ export default function App() {
               onDragOver={handleDragOver}
               className="flex-grow border-2 border-dashed border-slate-600 rounded-lg text-center cursor-pointer hover:border-blue-500 hover:bg-slate-800/50 transition-all flex flex-col justify-center items-center"
             >
-              <input type="file" ref={fileInputRef} onChange={(e) => handleFileSelect(e.target.files)} className="hidden" />
+              <input type="file" onChange={(e) => handleFileSelect(e.target.files)} className="hidden" id="file-input" />
               {selectedFile ? (
                 <div className="p-4">
                   <File className="w-16 h-16 mx-auto text-blue-400 mb-3" />
@@ -454,15 +459,15 @@ export default function App() {
                   </button>
                 </div>
               ) : (
-                <div onClick={() => fileInputRef.current?.click()} className="p-4">
+                <label htmlFor="file-input" className="p-4 cursor-pointer">
                   <HardDrive className="w-12 h-12 mx-auto text-slate-500 mb-4" />
                   <p className="text-slate-400 font-semibold">Drag & drop a file here</p>
                   <p className="text-slate-500 text-sm">or click to select</p>
-                </div>
+                </label>
               )}
             </div>
             <button
-              onClick={() => sendFile(selectedFile, selectedUser.id)}
+              onClick={() => sendFile(selectedFile, selectedUser)}
               disabled={!selectedFile || !selectedUser || transferState.status !== 'idle'}
               className="w-full mt-4 bg-gradient-to-r from-blue-600 to-purple-600 text-white font-bold py-3 rounded-lg flex items-center justify-center gap-2 hover:from-blue-500 hover:to-purple-500 transition-all disabled:from-slate-600 disabled:to-slate-700 disabled:cursor-not-allowed disabled:opacity-60 shadow-lg hover:shadow-blue-500/30"
             >
@@ -515,7 +520,6 @@ export default function App() {
               <File className="w-16 h-16 mx-auto text-blue-400 mb-4" />
               <h2 className="text-2xl font-bold mb-2 text-slate-100">Incoming File</h2>
               <p className="text-slate-300 mb-4">
-                {/* *** FIX: Access the .name property of the senderNickname object *** */}
                 <span className="font-bold text-white">{transferState.senderNickname?.name}</span> wants to send you a file.
               </p>
               <div className="bg-slate-900/50 rounded-lg p-4 mb-6 text-left space-y-1 text-sm">
@@ -558,7 +562,7 @@ export default function App() {
               <p className="text-slate-300 mb-4">
                 {transferState.status === 'requesting' && `Waiting for ${users.find(u => u.id === transferState.to)?.nickname?.name} to accept...`}
                 {transferState.status === 'accepted' && `Connection established. Preparing to send...`}
-                {transferState.status === 'sending' && `Sending ${transferState.file.name}`}
+                {transferState.status === 'sending' && `Sending ${transferState.file?.name}`}
               </p>
               <div className="w-full bg-slate-700 rounded-full h-2.5">
                 <motion.div
