@@ -223,10 +223,18 @@ export default function App() {
     const onFileAccept = async ({ from }) => {
       const fromUser = users.find(u => u.id === from);
       if (!fromUser) return;
+      
+      // *** FIX: This check ensures the sender has a file selected before proceeding. ***
+      if (!selectedFile) {
+        addLog('Error: No file selected to send.', 'error');
+        // Optionally, notify the other user that the transfer was cancelled.
+        return;
+      }
+
       addLog(`${fromUser.nickname.name} accepted the file.`, 'success');
       setTransferState(prev => ({ ...prev, status: 'accepted', to: from }));
       const pc = createPeerConnection(from);
-      if (pc && selectedFile) {
+      if (pc) {
         handleFileChunk(pc, selectedFile);
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
@@ -254,7 +262,7 @@ export default function App() {
             receivedData.current.push(e.data);
             receivedSize.current += e.data.byteLength;
             const progress = Math.round((receivedSize.current / transferState.file.size) * 100);
-            setTransferState(prev => ({...prev, progress}));
+            setTransferState(prev => ({...prev, progress, status: 'sending'})); // Show progress on receiver
 
             if (receivedSize.current === transferState.file.size) {
               const blob = new Blob(receivedData.current, { type: transferState.file.type });
@@ -281,13 +289,13 @@ export default function App() {
     
     const onWebRTCAnswer = async ({ answer }) => {
       addLog('Received WebRTC answer.', 'info');
-      if (peerConnection.current) {
+      if (peerConnection.current && peerConnection.current.signalingState !== 'closed') {
         await peerConnection.current.setRemoteDescription(new RTCSessionDescription(answer));
       }
     };
 
     const onWebRTCIceCandidate = async ({ candidate }) => {
-      if (peerConnection.current) {
+      if (peerConnection.current && peerConnection.current.signalingState !== 'closed') {
         try {
           await peerConnection.current.addIceCandidate(new RTCIceCandidate(candidate));
         } catch (e) {
@@ -343,10 +351,8 @@ export default function App() {
     handleFileSelect(e.dataTransfer.files);
   };
 
-  // *** FIX: This function now provides immediate UI feedback. ***
   const handleAcceptFile = () => {
     if(!socket || !transferState.from) return;
-    // Immediately update the state to show feedback
     setTransferState(prev => ({ ...prev, status: 'connecting' }));
     socket.emit('file-accept', { to: transferState.from });
     addLog('Accepted file transfer. Waiting for sender...', 'success');
@@ -548,7 +554,6 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {/* *** FIX: Added a new modal for the 'connecting' state *** */}
       <AnimatePresence>
         {transferState.status === 'connecting' && (
              <motion.div
