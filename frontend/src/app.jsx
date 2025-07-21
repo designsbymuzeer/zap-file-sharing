@@ -1,16 +1,10 @@
 // frontend/src/App.jsx
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react'; // eslint-disable-line no-unused-vars
 import io from 'socket.io-client';
 // eslint-disable-next-line no-unused-vars
 import { motion, AnimatePresence } from 'framer-motion';
-import { User, File, Send, X, Settings, ChevronRight, HardDrive, AlertCircle, CheckCircle, ArrowUp, ArrowDown } from 'lucide-react';
-
-// --- Constants ---
-// This line is crucial for deployment. Vercel will inject the VITE_SERVER_URL environment variable during the build process.
-// For local development, it falls back to 'http://localhost:5000'.
-const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:5000';
-const CHUNK_SIZE = 64 * 1024; // 64KB
+import { User, File, Send, X, Settings, ChevronRight, HardDrive, AlertCircle, CheckCircle, ArrowUp, ArrowDown, Wifi } from 'lucide-react';
 
 // --- Animal Nicknames Data ---
 const animals = [
@@ -36,6 +30,10 @@ const animals = [
 const getRandomAnimal = () => {
   return animals[Math.floor(Math.random() * animals.length)];
 };
+
+// --- Constants ---
+const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:5000';
+const CHUNK_SIZE = 64 * 1024; // 64KB
 
 // --- Helper Functions ---
 const formatBytes = (bytes, decimals = 2) => {
@@ -66,7 +64,7 @@ export default function App() {
     from: null,
     to: null,
     file: null,
-    senderNickname: '',
+    senderNickname: { name: '', emoji: '' }, // *** FIX: Initialize as an object ***
   });
 
   // --- Refs ---
@@ -84,20 +82,26 @@ export default function App() {
 
   // --- Socket.io Connection ---
   useEffect(() => {
-    const newSocket = io(SERVER_URL);
-    setSocket(newSocket);
+    if (!socket) {
+      const newSocket = io(SERVER_URL);
+      setSocket(newSocket);
 
-    newSocket.on('connect', () => {
-      addLog(`Connected to server with ID: ${newSocket.id}`, 'success');
-      newSocket.emit('user-joined', nickname);
-    });
+      newSocket.on('connect', () => {
+        addLog(`Connected to server with ID: ${newSocket.id}`, 'success');
+        newSocket.emit('user-joined', nickname);
+      });
 
-    newSocket.on('disconnect', () => {
-      addLog('Disconnected from server', 'error');
-    });
-
-    return () => newSocket.disconnect();
-  }, [addLog, nickname]);
+      newSocket.on('disconnect', () => {
+        addLog('Disconnected from server', 'error');
+      });
+    }
+    
+    return () => {
+        if(socket && socket.connected) {
+            socket.disconnect();
+        }
+    };
+  }, [nickname, addLog]);
 
   // --- WebRTC Peer Connection Management ---
   const createPeerConnection = useCallback(() => {
@@ -128,14 +132,14 @@ export default function App() {
   // --- File Transfer Logic ---
   const sendFile = useCallback((file, targetSocketId) => {
     if (!socket) return;
-    setTransferState({ status: 'requesting', progress: 0, to: targetSocketId, from: socket.id, file });
+    setTransferState({ status: 'requesting', progress: 0, to: targetSocketId, from: socket.id, file, senderNickname: nickname });
     socket.emit('file-request', {
       to: targetSocketId,
       from: socket.id,
       file: { name: file.name, size: file.size, type: file.type }
     });
-    addLog(`Sent file request for ${file.name} to ${users.find(u => u.id === targetSocketId)?.nickname}`, 'info');
-  }, [socket, users, addLog]);
+    addLog(`Sent file request for ${file.name} to ${users.find(u => u.id === targetSocketId)?.nickname?.name}`, 'info');
+  }, [socket, users, addLog, nickname]);
 
   const handleFileChunk = useCallback((pc) => {
     const dataChannel = pc.createDataChannel('file-transfer');
@@ -149,17 +153,22 @@ export default function App() {
 
       fileReader.current.onload = (e) => {
         if (!e.target.result) return;
-        dataChannel.send(e.target.result);
-        offset += e.target.result.byteLength;
-        const progress = Math.round((offset / selectedFile.size) * 100);
-        setTransferState(prev => ({ ...prev, progress }));
+        try {
+          dataChannel.send(e.target.result);
+          offset += e.target.result.byteLength;
+          const progress = Math.round((offset / selectedFile.size) * 100);
+          setTransferState(prev => ({ ...prev, progress }));
 
-        if (offset < selectedFile.size) {
-          readSlice(offset);
-        } else {
-          addLog('File sent successfully!', 'success');
-          setTransferState(prev => ({ ...prev, status: 'completed' }));
-          setTimeout(() => resetTransferState(), 3000);
+          if (offset < selectedFile.size) {
+            readSlice(offset);
+          } else {
+            addLog('File sent successfully!', 'success');
+            setTransferState(prev => ({ ...prev, status: 'completed' }));
+            setTimeout(() => resetTransferState(), 3000);
+          }
+        } catch(error) {
+          addLog(`Send error: ${error}`, 'error');
+          setTransferState({ status: 'error', file: null });
         }
       };
       
@@ -182,10 +191,12 @@ export default function App() {
   }, [selectedFile, addLog]);
 
   const resetTransferState = () => {
-    setTransferState({ status: 'idle', progress: 0, from: null, to: null, file: null, senderNickname: '' });
+    setTransferState({ status: 'idle', progress: 0, from: null, to: null, file: null, senderNickname: { name: '', emoji: '' } });
     setSelectedFile(null);
     setSelectedUser(null);
-    receivedData.current = [];
+    if (receivedData.current.length > 0) {
+        receivedData.current = [];
+    }
     receivedSize.current = 0;
     if (peerConnection.current) {
         peerConnection.current.close();
@@ -202,13 +213,18 @@ export default function App() {
       addLog('User list updated.');
     };
 
+    // *** FIX: Handle the senderNickname as an object ***
     const handleFileRequest = ({ from, senderNickname, file }) => {
-      setTransferState({ status: 'receiving', progress: 0, from, to: socket.id, file, senderNickname });
-      addLog(`Incoming file request from ${senderNickname} for ${file.name}`, 'info');
+      if (senderNickname && senderNickname.name) {
+          setTransferState({ status: 'receiving', progress: 0, from, to: socket.id, file, senderNickname });
+          addLog(`Incoming file request from ${senderNickname.name} for ${file.name}`, 'info');
+      } else {
+          addLog(`Invalid file request received from ${from}`, 'error');
+      }
     };
 
     const handleFileAccept = async ({ from }) => {
-      addLog(`${users.find(u => u.id === from)?.nickname} accepted the file.`, 'success');
+      addLog(`${users.find(u => u.id === from)?.nickname?.name} accepted the file.`, 'success');
       setTransferState(prev => ({ ...prev, status: 'accepted', to: from }));
       const pc = createPeerConnection();
       if (pc) {
@@ -220,12 +236,12 @@ export default function App() {
     };
     
     const handleFileReject = ({ from }) => {
-      addLog(`${users.find(u => u.id === from)?.nickname} rejected the file.`, 'error');
+      addLog(`${users.find(u => u.id === from)?.nickname?.name} rejected the file.`, 'error');
       resetTransferState();
     };
 
     const handleWebRTCOffer = async ({ from, offer }) => {
-      addLog(`Received WebRTC offer from ${users.find(u => u.id === from)?.nickname}`, 'info');
+      addLog(`Received WebRTC offer from ${users.find(u => u.id === from)?.nickname?.name}`, 'info');
       const pc = createPeerConnection();
       if (pc) {
         pc.ondatachannel = (event) => {
@@ -298,13 +314,12 @@ export default function App() {
   }, [socket, addLog, createPeerConnection, handleFileChunk, transferState.file, users]);
 
   // --- UI Event Handlers ---
-  /*const handleNicknameChange = (e) => {
+  const handleNicknameChange = (e) => {
     if (e.key === 'Enter') {
       socket.emit('update-nickname', nickname);
       setIsEditingNickname(false);
-      addLog(`Nickname changed to ${nickname}`, 'success');
     }
-  };*/
+  };
 
   const handleFileSelect = (files) => {
     if (files && files[0]) {
@@ -335,112 +350,124 @@ export default function App() {
   const otherUsers = users.filter(user => user.id !== socket?.id);
 
   return (
-    <div className="bg-gray-900 text-white min-h-screen font-sans flex flex-col items-center justify-center p-4 relative overflow-hidden">
+    <div className="bg-slate-900 text-slate-300 min-h-screen font-sans flex flex-col items-center justify-center p-4 relative overflow-hidden">
       {/* Background Glows */}
-      <div className="absolute top-0 left-0 w-72 h-72 bg-purple-600 rounded-full mix-blend-screen filter blur-3xl opacity-20 animate-blob"></div>
-      <div className="absolute top-0 right-0 w-72 h-72 bg-blue-600 rounded-full mix-blend-screen filter blur-3xl opacity-20 animate-blob animation-delay-2000"></div>
-      <div className="absolute bottom-0 left-1/4 w-72 h-72 bg-pink-600 rounded-full mix-blend-screen filter blur-3xl opacity-20 animate-blob animation-delay-4000"></div>
+      <div className="absolute top-0 -left-4 w-72 h-72 bg-purple-600 rounded-full mix-blend-screen filter blur-xl opacity-20 animate-blob"></div>
+      <div className="absolute top-0 -right-4 w-72 h-72 bg-blue-600 rounded-full mix-blend-screen filter blur-xl opacity-20 animate-blob animation-delay-2000"></div>
+      <div className="absolute -bottom-8 left-20 w-72 h-72 bg-pink-600 rounded-full mix-blend-screen filter blur-xl opacity-20 animate-blob animation-delay-4000"></div>
 
-      <main className="w-full max-w-4xl mx-auto bg-gray-900/50 backdrop-blur-xl rounded-2xl shadow-2xl z-10 border border-gray-700/50">
+      <main className="w-full max-w-4xl mx-auto bg-slate-800/40 backdrop-blur-lg rounded-2xl shadow-2xl z-10 border border-slate-700/50 overflow-hidden">
         {/* Header */}
-        <header className="p-4 sm:p-6 border-b border-gray-700/50 flex justify-between items-center">
+        <header className="p-4 sm:p-5 border-b border-slate-700/50 flex justify-between items-center">
           <div className="flex items-center gap-3">
-            <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} transition={{ type: 'spring', stiffness: 260, damping: 20 }}>
-              <Send className="text-blue-400 w-8 h-8" />
+            <motion.div 
+              initial={{ scale: 0, rotate: -45 }} 
+              animate={{ scale: 1, rotate: 0 }} 
+              transition={{ type: 'spring', stiffness: 260, damping: 20, delay: 0.2 }}
+              className="p-2 bg-gradient-to-br from-blue-500 to-purple-600 rounded-lg"
+            >
+              <Send className="text-white w-6 h-6" />
             </motion.div>
-            <h1 className="text-2xl font-bold tracking-tighter text-gray-100">Zap</h1>
+            <h1 className="text-2xl font-bold tracking-tight text-slate-100">Zap</h1>
           </div>
           <div className="flex items-center gap-4">
-            
-          <div className="flex items-center gap-2 bg-slate-700/50 pl-2 pr-3 py-1.5 rounded-lg text-sm">
-  <span className="text-lg">{nickname.emoji}</span>
-  {isEditingNickname ? (
-    <input
-      type="text"
-      value={nickname.name}
-      onChange={(e) => setNickname({ ...nickname, name: e.target.value })}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') {
-          socket.emit('update-nickname', nickname);
-          setIsEditingNickname(false);
-        }
-      }}
-      onBlur={() => {
-        socket.emit('update-nickname', nickname);
-        setIsEditingNickname(false);
-      }}
-      className="bg-transparent focus:outline-none w-24 text-slate-200"
-      autoFocus
-    />
-  ) : (
-    <span onClick={() => setIsEditingNickname(true)} className="cursor-pointer font-medium text-slate-200">{nickname.name}</span>
-  )}
-</div>
-
-
-            <button onClick={() => setShowDebug(!showDebug)} className="p-2 rounded-lg hover:bg-gray-700/50 transition-colors">
+            <div className="flex items-center gap-2 bg-slate-700/50 pl-2 pr-3 py-1.5 rounded-lg text-sm">
+              <span className="text-lg">{nickname.emoji}</span>
+              {isEditingNickname ? (
+                <input
+                  type="text"
+                  value={nickname.name}
+                  onChange={(e) => setNickname({ ...nickname, name: e.target.value })}
+                  onKeyDown={handleNicknameChange}
+                  onBlur={() => {
+                    socket.emit('update-nickname', nickname);
+                    setIsEditingNickname(false);
+                  }}
+                  className="bg-transparent focus:outline-none w-24 text-slate-200"
+                  autoFocus
+                />
+              ) : (
+                <span onClick={() => setIsEditingNickname(true)} className="cursor-pointer font-medium text-slate-200">{nickname.name}</span>
+              )}
+            </div>
+            <button onClick={() => setShowDebug(!showDebug)} className="p-2 rounded-lg hover:bg-slate-700/50 transition-colors text-slate-400 hover:text-slate-200">
               <Settings className={`w-5 h-5 transition-transform duration-300 ${showDebug ? 'rotate-90' : ''}`} />
             </button>
           </div>
         </header>
 
         {/* Main Content */}
-        <div className="grid md:grid-cols-2">
+        <div className="grid md:grid-cols-[1fr,1.5fr]">
           {/* Left Panel: Users */}
-          <div className="p-4 sm:p-6 border-b md:border-b-0 md:border-r border-gray-700/50">
-            <h2 className="text-lg font-semibold mb-4 text-gray-300">Connected Devices</h2>
-            <div className="space-y-3 h-64 overflow-y-auto pr-2">
+          <div className="p-4 sm:p-5 border-b md:border-b-0 md:border-r border-slate-700/50 bg-slate-800/20">
+            <h2 className="text-lg font-semibold mb-4 text-slate-200 flex items-center gap-2"><Wifi size={20}/> Devices on Network</h2>
+            <div className="space-y-2 h-72 overflow-y-auto pr-2">
+              <AnimatePresence>
               {otherUsers.length > 0 ? (
                 otherUsers.map(user => (
                   <motion.div
                     key={user.id}
                     layout
-                    initial={{ opacity: 0, y: 20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -20 }}
+                    initial={{ opacity: 0, x: -20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: -20 }}
                     onClick={() => setSelectedUser(user)}
-                    className={`flex items-center justify-between p-3 rounded-lg cursor-pointer transition-all duration-200 ${selectedUser?.id === user.id ? 'bg-blue-500/20 ring-2 ring-blue-500' : 'bg-gray-800/60 hover:bg-gray-700/80'}`}
+                    className={`flex items-center justify-between p-3 rounded-lg cursor-pointer transition-all duration-200 group ${selectedUser?.id === user.id ? 'bg-blue-500/20 ring-2 ring-blue-500' : 'bg-slate-700/40 hover:bg-slate-700/80'}`}
                   >
                     <div className="flex items-center gap-3">
-                      <User className="w-5 h-5 text-gray-400" />
-                      <span className="font-medium">{user.nickname}</span>
+                      <div className="relative">
+                        <span className="text-2xl">{user.nickname.emoji}</span>
+                        <div className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 bg-green-400 rounded-full border-2 border-slate-800"></div>
+                      </div>
+                      <span className="font-medium text-slate-300">{user.nickname.name}</span>
                     </div>
-                    <ChevronRight className="w-5 h-5 text-gray-500" />
+                    <ChevronRight className="w-5 h-5 text-slate-500 group-hover:translate-x-1 transition-transform" />
                   </motion.div>
                 ))
               ) : (
-                <div className="text-center text-gray-500 pt-10">No other devices found.</div>
+                <motion.div initial={{opacity: 0}} animate={{opacity: 1}} className="text-center text-slate-500 pt-16 flex flex-col items-center">
+                  <Wifi size={32} className="mb-2"/>
+                  <p className="font-medium">Searching for devices...</p>
+                  <p className="text-xs">Open Zap on another device on the same Wi-Fi.</p>
+                </motion.div>
               )}
+              </AnimatePresence>
             </div>
           </div>
 
           {/* Right Panel: File Upload */}
-          <div className="p-4 sm:p-6">
-            <h2 className="text-lg font-semibold mb-4 text-gray-300">Share a File</h2>
+          <div className="p-4 sm:p-5 flex flex-col">
+            <h2 className="text-lg font-semibold mb-4 text-slate-200">Share a File</h2>
             <div
               onDrop={handleDrop}
               onDragOver={handleDragOver}
-              onClick={() => fileInputRef.current?.click()}
-              className="border-2 border-dashed border-gray-600 rounded-lg p-8 text-center cursor-pointer hover:border-blue-500 hover:bg-gray-800/50 transition-all"
+              className="flex-grow border-2 border-dashed border-slate-600 rounded-lg text-center cursor-pointer hover:border-blue-500 hover:bg-slate-800/50 transition-all flex flex-col justify-center items-center"
             >
               <input type="file" ref={fileInputRef} onChange={(e) => handleFileSelect(e.target.files)} className="hidden" />
-              <HardDrive className="w-12 h-12 mx-auto text-gray-500 mb-4" />
               {selectedFile ? (
-                <div>
-                  <p className="font-semibold text-gray-200">{selectedFile.name}</p>
-                  <p className="text-sm text-gray-400">{formatBytes(selectedFile.size)}</p>
+                <div className="p-4">
+                  <File className="w-16 h-16 mx-auto text-blue-400 mb-3" />
+                  <p className="font-semibold text-slate-200 break-all">{selectedFile.name}</p>
+                  <p className="text-sm text-slate-400">{formatBytes(selectedFile.size)}</p>
+                  <button onClick={(e) => { e.stopPropagation(); setSelectedFile(null); }} className="mt-3 text-xs text-red-400 hover:underline">
+                    Clear file
+                  </button>
                 </div>
               ) : (
-                <p className="text-gray-400">Drag & drop a file here, or click to select</p>
+                <div onClick={() => fileInputRef.current?.click()} className="p-4">
+                  <HardDrive className="w-12 h-12 mx-auto text-slate-500 mb-4" />
+                  <p className="text-slate-400 font-semibold">Drag & drop a file here</p>
+                  <p className="text-slate-500 text-sm">or click to select</p>
+                </div>
               )}
             </div>
             <button
               onClick={() => sendFile(selectedFile, selectedUser.id)}
               disabled={!selectedFile || !selectedUser || transferState.status !== 'idle'}
-              className="w-full mt-4 bg-blue-600 text-white font-bold py-3 rounded-lg flex items-center justify-center gap-2 hover:bg-blue-500 transition-all disabled:bg-gray-600 disabled:cursor-not-allowed disabled:opacity-50"
+              className="w-full mt-4 bg-gradient-to-r from-blue-600 to-purple-600 text-white font-bold py-3 rounded-lg flex items-center justify-center gap-2 hover:from-blue-500 hover:to-purple-500 transition-all disabled:from-slate-600 disabled:to-slate-700 disabled:cursor-not-allowed disabled:opacity-60 shadow-lg hover:shadow-blue-500/30"
             >
               <Send className="w-5 h-5" />
-              Send to {selectedUser?.nickname || '...'}
+              Send to {selectedUser?.nickname?.name || '...'}
             </button>
           </div>
         </div>
@@ -454,12 +481,12 @@ export default function App() {
               exit={{ height: 0, opacity: 0 }}
               className="overflow-hidden"
             >
-              <div className="p-4 border-t border-gray-700/50 bg-gray-900/30">
-                <h3 className="font-semibold mb-2">Debug Log</h3>
+              <div className="p-4 border-t border-slate-700/50 bg-slate-900/30">
+                <h3 className="font-semibold mb-2 text-slate-300">Debug Log</h3>
                 <div className="h-32 bg-black/30 rounded-md p-2 overflow-y-auto text-xs font-mono">
                   {logs.map((log, i) => (
-                    <div key={i} className={`flex gap-2 ${log.type === 'error' ? 'text-red-400' : log.type === 'success' ? 'text-green-400' : 'text-gray-400'}`}>
-                      <span>{log.time}</span>
+                    <div key={i} className={`flex gap-2 ${log.type === 'error' ? 'text-red-400' : log.type === 'success' ? 'text-green-400' : 'text-sky-400'}`}>
+                      <span className="text-slate-500">{log.time}</span>
                       <span>{log.message}</span>
                     </div>
                   ))}
@@ -477,29 +504,30 @@ export default function App() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="absolute inset-0 bg-black/60 flex items-center justify-center z-50 p-4"
+            className="absolute inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4"
           >
             <motion.div
               initial={{ scale: 0.9, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.9, opacity: 0 }}
-              className="bg-gray-800 rounded-2xl p-8 shadow-2xl w-full max-w-md text-center border border-gray-700"
+              className="bg-slate-800 rounded-2xl p-8 shadow-2xl w-full max-w-md text-center border border-slate-700"
             >
               <File className="w-16 h-16 mx-auto text-blue-400 mb-4" />
-              <h2 className="text-2xl font-bold mb-2">Incoming File</h2>
-              <p className="text-gray-300 mb-4">
-                <span className="font-bold text-white">{transferState.senderNickname}</span> wants to send you a file.
+              <h2 className="text-2xl font-bold mb-2 text-slate-100">Incoming File</h2>
+              <p className="text-slate-300 mb-4">
+                {/* *** FIX: Access the .name property of the senderNickname object *** */}
+                <span className="font-bold text-white">{transferState.senderNickname?.name}</span> wants to send you a file.
               </p>
-              <div className="bg-gray-900/50 rounded-lg p-4 mb-6 text-left">
+              <div className="bg-slate-900/50 rounded-lg p-4 mb-6 text-left space-y-1 text-sm">
                 <p><strong>File:</strong> {transferState.file.name}</p>
                 <p><strong>Size:</strong> {formatBytes(transferState.file.size)}</p>
                 <p><strong>Type:</strong> {transferState.file.type}</p>
               </div>
               <div className="flex gap-4">
-                <button onClick={handleRejectFile} className="flex-1 bg-red-600/80 hover:bg-red-600 text-white font-bold py-3 rounded-lg transition-colors flex items-center justify-center gap-2">
+                <button onClick={handleRejectFile} className="flex-1 bg-slate-700 hover:bg-slate-600 text-white font-bold py-3 rounded-lg transition-colors flex items-center justify-center gap-2">
                   <X /> Reject
                 </button>
-                <button onClick={handleAcceptFile} className="flex-1 bg-green-600/80 hover:bg-green-600 text-white font-bold py-3 rounded-lg transition-colors flex items-center justify-center gap-2">
+                <button onClick={handleAcceptFile} className="flex-1 bg-green-600 hover:bg-green-500 text-white font-bold py-3 rounded-lg transition-colors flex items-center justify-center gap-2">
                   <CheckCircle /> Accept
                 </button>
               </div>
@@ -508,38 +536,39 @@ export default function App() {
         )}
       </AnimatePresence>
 
+      {/* Other Modals remain the same */}
       <AnimatePresence>
         {(transferState.status === 'sending' || transferState.status === 'requesting' || transferState.status === 'accepted') && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="absolute inset-0 bg-black/60 flex items-center justify-center z-50 p-4"
+            className="absolute inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4"
           >
             <motion.div
               initial={{ scale: 0.9, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.9, opacity: 0 }}
-              className="bg-gray-800 rounded-2xl p-8 shadow-2xl w-full max-w-md text-center border border-gray-700"
+              className="bg-slate-800 rounded-2xl p-8 shadow-2xl w-full max-w-md text-center border border-slate-700"
             >
               <ArrowUp className="w-16 h-16 mx-auto text-blue-400 mb-4 animate-pulse" />
-              <h2 className="text-2xl font-bold mb-2">
+              <h2 className="text-2xl font-bold mb-2 text-slate-100">
                 {transferState.status === 'sending' ? 'Sending File...' : 'Requesting Transfer...'}
               </h2>
-              <p className="text-gray-300 mb-4">
-                {transferState.status === 'requesting' && `Waiting for ${users.find(u => u.id === transferState.to)?.nickname} to accept...`}
-                {transferState.status === 'accepted' && `Connecting...`}
+              <p className="text-slate-300 mb-4">
+                {transferState.status === 'requesting' && `Waiting for ${users.find(u => u.id === transferState.to)?.nickname?.name} to accept...`}
+                {transferState.status === 'accepted' && `Connection established. Preparing to send...`}
                 {transferState.status === 'sending' && `Sending ${transferState.file.name}`}
               </p>
-              <div className="w-full bg-gray-700 rounded-full h-2.5">
+              <div className="w-full bg-slate-700 rounded-full h-2.5">
                 <motion.div
-                  className="bg-blue-500 h-2.5 rounded-full"
+                  className="bg-gradient-to-r from-blue-500 to-purple-500 h-2.5 rounded-full"
                   initial={{ width: 0 }}
                   animate={{ width: `${transferState.progress}%` }}
                   transition={{ duration: 0.2, ease: 'linear' }}
                 />
               </div>
-              <p className="text-sm mt-2 text-gray-400">{transferState.progress}%</p>
+              <p className="text-sm mt-2 text-slate-400">{transferState.progress}%</p>
             </motion.div>
           </motion.div>
         )}
@@ -551,16 +580,16 @@ export default function App() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="absolute inset-0 bg-black/60 flex items-center justify-center z-50 p-4"
+            className="absolute inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4"
           >
             <motion.div
               initial={{ scale: 0.9, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.9, opacity: 0 }}
-              className="bg-gray-800 rounded-2xl p-8 shadow-2xl w-full max-w-md text-center border border-gray-700"
+              className="bg-slate-800 rounded-2xl p-8 shadow-2xl w-full max-w-md text-center border border-slate-700"
             >
               <CheckCircle className="w-16 h-16 mx-auto text-green-400 mb-4" />
-              <h2 className="text-2xl font-bold mb-2">Transfer Complete!</h2>
+              <h2 className="text-2xl font-bold mb-2 text-slate-100">Transfer Complete!</h2>
             </motion.div>
           </motion.div>
         )}
@@ -569,17 +598,17 @@ export default function App() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="absolute inset-0 bg-black/60 flex items-center justify-center z-50 p-4"
+            className="absolute inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4"
           >
             <motion.div
               initial={{ scale: 0.9, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.9, opacity: 0 }}
-              className="bg-gray-800 rounded-2xl p-8 shadow-2xl w-full max-w-md text-center border border-gray-700"
+              className="bg-slate-800 rounded-2xl p-8 shadow-2xl w-full max-w-md text-center border border-slate-700"
             >
               <AlertCircle className="w-16 h-16 mx-auto text-red-400 mb-4" />
-              <h2 className="text-2xl font-bold mb-2">Transfer Failed</h2>
-              <p className="text-gray-400">{transferState.status === 'rejected' ? 'The user rejected the file.' : 'An error occurred.'}</p>
+              <h2 className="text-2xl font-bold mb-2 text-slate-100">Transfer Failed</h2>
+              <p className="text-slate-400">{transferState.status === 'rejected' ? 'The user rejected the file.' : 'An error occurred.'}</p>
             </motion.div>
           </motion.div>
         )}
@@ -588,73 +617,3 @@ export default function App() {
     </div>
   );
 }
-
-// --- Frontend package.json ---
-/*
-{
-  "name": "zap-frontend",
-  "private": true,
-  "version": "0.0.0",
-  "type": "module",
-  "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "lint": "eslint . --ext js,jsx --report-unused-disable-directives --max-warnings 0",
-    "preview": "vite preview"
-  },
-  "dependencies": {
-    "framer-motion": "^10.16.4",
-    "lucide-react": "^0.292.0",
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0",
-    "socket.io-client": "^4.7.2"
-  },
-  "devDependencies": {
-    "@types/react": "^18.2.37",
-    "@types/react-dom": "^18.2.15",
-    "@vitejs/plugin-react": "^4.2.0",
-    "autoprefixer": "^10.4.16",
-    "eslint": "^8.53.0",
-    "eslint-plugin-react": "^7.33.2",
-    "eslint-plugin-react-hooks": "^4.6.0",
-    "eslint-plugin-react-refresh": "^0.4.4",
-    "postcss": "^8.4.31",
-    "tailwindcss": "^3.3.5",
-    "vite": "^5.0.0"
-  }
-}
-*/
-
-// --- index.css for Tailwind ---
-/*
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
-body {
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-}
-
-.animation-delay-2000 {
-  animation-delay: 2s;
-}
-.animation-delay-4000 {
-  animation-delay: 4s;
-}
-
-@keyframes blob {
-  0% {
-    transform: translate(0px, 0px) scale(1);
-  }
-  33% {
-    transform: translate(30px, -50px) scale(1.1);
-  }
-  66% {
-    transform: translate(-20px, 20px) scale(0.9);
-  }
-  100% {
-    transform: translate(0px, 0px) scale(1);
-  }
-}
-*/
