@@ -4,7 +4,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import io from 'socket.io-client';
 // eslint-disable-next-line no-unused-vars
 import { motion, AnimatePresence } from 'framer-motion';
-import { User, File, Send, X, Settings, ChevronRight, HardDrive, AlertCircle, CheckCircle, ArrowUp, ArrowDown, Wifi } from 'lucide-react';
+import { User, File, Send, X, Settings, ChevronRight, HardDrive, AlertCircle, CheckCircle, ArrowUp, ArrowDown, Wifi, Loader } from 'lucide-react';
 
 // --- Animal Nicknames Data ---
 const animals = [
@@ -59,7 +59,7 @@ export default function App() {
   
   // Transfer-related state
   const [transferState, setTransferState] = useState({
-    status: 'idle', // 'requesting', 'accepted', 'rejected', 'sending', 'receiving', 'completed', 'error'
+    status: 'idle', // 'requesting', 'accepted', 'rejected', 'sending', 'receiving', 'connecting', 'completed', 'error'
     progress: 0,
     from: null,
     to: null,
@@ -80,9 +80,11 @@ export default function App() {
   }, []);
   
   // --- Socket.io Connection ---
-  // *** FIX: This useEffect now only runs ONCE to establish the connection. ***
   useEffect(() => {
-    const newSocket = io(SERVER_URL);
+    const newSocket = io(SERVER_URL, {
+        reconnectionAttempts: 5,
+        reconnectionDelay: 1000,
+    });
     setSocket(newSocket);
 
     return () => {
@@ -105,6 +107,10 @@ export default function App() {
 
       pc.oniceconnectionstatechange = () => {
         addLog(`ICE connection state: ${pc.iceConnectionState}`);
+        if(pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'closed') {
+            addLog('WebRTC connection failed.', 'error');
+            resetTransferState();
+        }
       };
 
       peerConnection.current = pc;
@@ -188,7 +194,6 @@ export default function App() {
   };
 
   // --- Socket Event Handlers ---
-  // *** FIX: This useEffect now robustly handles all event listeners. ***
   useEffect(() => {
     if (!socket) return;
 
@@ -318,7 +323,7 @@ export default function App() {
 
   // --- UI Event Handlers ---
   const handleNicknameChange = (e) => {
-    if (e.key === 'Enter') {
+    if (e.key === 'Enter' && socket) {
       socket.emit('update-nickname', nickname);
       setIsEditingNickname(false);
     }
@@ -338,10 +343,13 @@ export default function App() {
     handleFileSelect(e.dataTransfer.files);
   };
 
+  // *** FIX: This function now provides immediate UI feedback. ***
   const handleAcceptFile = () => {
     if(!socket || !transferState.from) return;
+    // Immediately update the state to show feedback
+    setTransferState(prev => ({ ...prev, status: 'connecting' }));
     socket.emit('file-accept', { to: transferState.from });
-    addLog('Accepted file transfer.', 'success');
+    addLog('Accepted file transfer. Waiting for sender...', 'success');
   };
 
   const handleRejectFile = () => {
@@ -385,7 +393,7 @@ export default function App() {
                   onChange={(e) => setNickname({ ...nickname, name: e.target.value })}
                   onKeyDown={handleNicknameChange}
                   onBlur={() => {
-                    socket.emit('update-nickname', nickname);
+                    if (socket) socket.emit('update-nickname', nickname);
                     setIsEditingNickname(false);
                   }}
                   className="bg-transparent focus:outline-none w-24 text-slate-200"
@@ -540,7 +548,31 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {/* Other Modals remain the same */}
+      {/* *** FIX: Added a new modal for the 'connecting' state *** */}
+      <AnimatePresence>
+        {transferState.status === 'connecting' && (
+             <motion.div
+             initial={{ opacity: 0 }}
+             animate={{ opacity: 1 }}
+             exit={{ opacity: 0 }}
+             className="absolute inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+           >
+             <motion.div
+               initial={{ scale: 0.9, opacity: 0 }}
+               animate={{ scale: 1, opacity: 1 }}
+               exit={{ scale: 0.9, opacity: 0 }}
+               className="bg-slate-800 rounded-2xl p-8 shadow-2xl w-full max-w-md text-center border border-slate-700"
+             >
+               <Loader className="w-16 h-16 mx-auto text-blue-400 mb-4 animate-spin" />
+               <h2 className="text-2xl font-bold mb-2 text-slate-100">Connecting...</h2>
+               <p className="text-slate-300 mb-4">
+                Establishing a secure connection with {transferState.senderNickname?.name}.
+               </p>
+             </motion.div>
+           </motion.div>
+        )}
+      </AnimatePresence>
+
       <AnimatePresence>
         {(transferState.status === 'sending' || transferState.status === 'requesting' || transferState.status === 'accepted') && (
           <motion.div
