@@ -49,7 +49,7 @@ const formatBytes = (bytes, decimals = 2) => {
 export default function App() {
   // --- State Management ---
   const [socket, setSocket] = useState(null);
-  const [nickname, setNickname] = useState(() => getRandomAnimal()); // Use function form to run only once
+  const [nickname, setNickname] = useState(() => getRandomAnimal());
   const [isEditingNickname, setIsEditingNickname] = useState(false);
   const [users, setUsers] = useState([]);
   const [selectedFile, setSelectedFile] = useState(null);
@@ -59,7 +59,7 @@ export default function App() {
   
   // Transfer-related state
   const [transferState, setTransferState] = useState({
-    status: 'idle', // 'requesting', 'accepted', 'rejected', 'sending', 'receiving', 'connecting', 'completed', 'error'
+    status: 'idle',
     progress: 0,
     from: null,
     to: null,
@@ -72,6 +72,8 @@ export default function App() {
   const fileReader = useRef(null);
   const receivedData = useRef([]);
   const receivedSize = useRef(0);
+  // *** FIX: Use a ref to hold the file for event handlers, preventing stale state. ***
+  const fileToSend = useRef(null);
 
   // --- Utility Functions ---
   const addLog = useCallback((message, type = 'info') => {
@@ -184,6 +186,7 @@ export default function App() {
   const resetTransferState = () => {
     setTransferState({ status: 'idle', progress: 0, from: null, to: null, file: null, senderNickname: { name: '', emoji: '' } });
     setSelectedFile(null);
+    fileToSend.current = null;
     setSelectedUser(null);
     receivedData.current = [];
     receivedSize.current = 0;
@@ -224,10 +227,9 @@ export default function App() {
       const fromUser = users.find(u => u.id === from);
       if (!fromUser) return;
       
-      // *** FIX: This check ensures the sender has a file selected before proceeding. ***
-      if (!selectedFile) {
+      // *** FIX: Use the ref to get the current file, preventing stale state. ***
+      if (!fileToSend.current) {
         addLog('Error: No file selected to send.', 'error');
-        // Optionally, notify the other user that the transfer was cancelled.
         return;
       }
 
@@ -235,7 +237,7 @@ export default function App() {
       setTransferState(prev => ({ ...prev, status: 'accepted', to: from }));
       const pc = createPeerConnection(from);
       if (pc) {
-        handleFileChunk(pc, selectedFile);
+        handleFileChunk(pc, fileToSend.current);
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
         socket.emit('webrtc-offer', { to: from, offer });
@@ -259,10 +261,13 @@ export default function App() {
           const receiveChannel = event.channel;
           receiveChannel.binaryType = 'arraybuffer';
           receiveChannel.onmessage = (e) => {
+            if (receivedSize.current === 0) {
+              setTransferState(prev => ({...prev, status: 'sending'})); // Show progress on receiver
+            }
             receivedData.current.push(e.data);
             receivedSize.current += e.data.byteLength;
             const progress = Math.round((receivedSize.current / transferState.file.size) * 100);
-            setTransferState(prev => ({...prev, progress, status: 'sending'})); // Show progress on receiver
+            setTransferState(prev => ({...prev, progress}));
 
             if (receivedSize.current === transferState.file.size) {
               const blob = new Blob(receivedData.current, { type: transferState.file.type });
@@ -327,7 +332,7 @@ export default function App() {
       socket.off('webrtc-answer', onWebRTCAnswer);
       socket.off('webrtc-ice-candidate', onWebRTCIceCandidate);
     };
-  }, [socket, nickname, addLog, users, createPeerConnection, handleFileChunk, selectedFile, transferState.file]);
+  }, [socket, nickname, addLog, users, createPeerConnection, handleFileChunk, transferState.file]);
 
   // --- UI Event Handlers ---
   const handleNicknameChange = (e) => {
@@ -341,6 +346,8 @@ export default function App() {
     if (files && files[0]) {
       const file = files[0];
       setSelectedFile(file);
+      // *** FIX: Update the ref whenever a new file is selected. ***
+      fileToSend.current = file; 
       addLog(`Selected file: ${file.name} (${formatBytes(file.size)})`);
     }
   };
@@ -468,7 +475,7 @@ export default function App() {
                   <File className="w-16 h-16 mx-auto text-blue-400 mb-3" />
                   <p className="font-semibold text-slate-200 break-all">{selectedFile.name}</p>
                   <p className="text-sm text-slate-400">{formatBytes(selectedFile.size)}</p>
-                  <button onClick={(e) => { e.stopPropagation(); setSelectedFile(null); }} className="mt-3 text-xs text-red-400 hover:underline">
+                  <button onClick={(e) => { e.stopPropagation(); setSelectedFile(null); fileToSend.current = null; }} className="mt-3 text-xs text-red-400 hover:underline">
                     Clear file
                   </button>
                 </div>
@@ -571,7 +578,7 @@ export default function App() {
                <Loader className="w-16 h-16 mx-auto text-blue-400 mb-4 animate-spin" />
                <h2 className="text-2xl font-bold mb-2 text-slate-100">Connecting...</h2>
                <p className="text-slate-300 mb-4">
-                Establishing a secure connection with {transferState.senderNickname?.name}.
+                Establishing a secure connection with {transferState.senderNickname?.name || users.find(u => u.id === transferState.to)?.nickname?.name}.
                </p>
              </motion.div>
            </motion.div>
